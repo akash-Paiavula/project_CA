@@ -1,0 +1,46 @@
+docker compose up --build
+
+:: See that all 3 containers are running
+docker compose ps
+
+:: Check that the database tables were created (you should see 6 tables)
+docker compose exec db psql -U taxeasy -d taxeasy -c "\dt"
+
+:: See registered users
+docker compose exec db psql -U taxeasy -d taxeasy -c "select name,email,role,email_verified,mobile_verified from users;"
+
+:: See the backend logs live
+docker compose logs -f backend
+
+:: See the upload and download audit trail
+docker compose exec db psql -U taxeasy -d taxeasy -c "select actor,action,ip,at from audit_log order by at desc limit 10;"
+
+
+:: Stop (press Ctrl+C in the running window), or from another terminal:
+docker compose stop
+
+:: Start again later (no rebuild needed)
+docker compose up
+
+:: Start in the background so the terminal stays free
+docker compose up -d
+
+:: Rebuild after you change any code
+docker compose up --build
+
+:: Erase all test data and start fresh (also recreates the database tables)
+docker compose down -v
+docker compose up --build
+
+
+:: "port is already allocated" on 8080: find what is using it
+netstat -ano | findstr :8080
+:: or change "8080:80" to "8081:80" in docker-compose.yml and open localhost:8081
+
+:: Tables missing, or database password errors after editing .env
+docker compose down -v
+docker compose up --build
+
+:: Backend can't connect to the database: look at the last log lines
+docker compose logs --tail=30 backend
+docker compose logs --tail=30 db
