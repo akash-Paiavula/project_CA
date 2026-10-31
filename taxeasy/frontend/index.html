@@ -1,0 +1,102 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TaxEasy: file your income tax</title>
+<style>
+:root{--bg:#f4f7fb;--c:#fff;--p:#0f766e;--t:#0f172a;--m:#64748b;--b:#e2e8f0}
+@media(prefers-color-scheme:dark){:root{--bg:#0b1220;--c:#131c2e;--t:#e5e7eb;--m:#94a3b8;--b:#263247}}
+*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--t)}
+header{padding:14px 24px;background:var(--p);color:#fff;display:flex;justify-content:space-between;align-items:center}
+main{max-width:920px;margin:24px auto;padding:0 16px}
+.card{background:var(--c);border:1px solid var(--b);border-radius:14px;padding:20px;margin-bottom:16px}
+.hero{padding:20px 0 8px}.hero h1{margin:0 0 8px;font-size:32px;line-height:1.2}.hero p{color:var(--m);margin:0 0 16px;max-width:60ch}
+input{font:inherit;width:100%;padding:11px 12px;margin:5px 0;border-radius:8px;border:1px solid var(--b);background:var(--bg);color:var(--t)}
+input:focus,button:focus-visible{outline:2px solid var(--p);outline-offset:2px}
+button{font:inherit;padding:10px 16px;border:0;border-radius:8px;background:var(--p);color:#fff;cursor:pointer;margin:4px 6px 4px 0}
+.steps{display:flex;gap:8px;flex-wrap:wrap}.s{padding:6px 14px;border-radius:99px;background:var(--b);color:var(--m);font-size:14px}.s.on{background:var(--p);color:#fff}
+table{width:100%;border-collapse:collapse}td,th{padding:8px;text-align:left;border-bottom:1px solid var(--b);vertical-align:top;font-size:14px}
+code{display:block;padding:12px;background:var(--bg);border-radius:8px;word-break:break-all;margin:10px 0}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}.row input{width:150px}
+@media(max-width:600px){.hero h1{font-size:24px}}
+</style></head><body>
+<header><b>TaxEasy</b><span id="who"></span></header><main id="app"></main>
+<script>
+const $=id=>document.getElementById(id),app=$('app'),enc=new TextEncoder();
+const b64=b=>btoa(String.fromCharCode(...new Uint8Array(b))),ub=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+const RSA={name:'RSA-OAEP',hash:'SHA-256'};let S=JSON.parse(sessionStorage.s||'null');
+const save=()=>sessionStorage.s=JSON.stringify(S);
+
+async function kdf(pw,salt,bits){const b=await crypto.subtle.importKey('raw',enc.encode(pw),'PBKDF2',false,['deriveBits','deriveKey']);
+ const p={name:'PBKDF2',salt,iterations:600000,hash:'SHA-256'};
+ return bits?b64(await crypto.subtle.deriveBits(p,b,256)):crypto.subtle.deriveKey(p,b,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
+const authSecret=(e,pw)=>kdf(pw,enc.encode('auth:'+e.toLowerCase()),true);
+async function wrapKey(priv,secret){const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
+ const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},await kdf(secret,salt),ub(priv));return JSON.stringify({s:b64(salt),i:b64(iv),c:b64(ct)})}
+async function unwrapKey(w,secret){const{s,i,c}=JSON.parse(w);return b64(await crypto.subtle.decrypt({name:'AES-GCM',iv:ub(i)},await kdf(secret,ub(s)),ub(c)))}
+async function genKeys(){const k=await crypto.subtle.generateKey({...RSA,modulusLength:2048,publicExponent:new Uint8Array([1,0,1])},true,['encrypt','decrypt']);
+ return{pub:b64(await crypto.subtle.exportKey('spki',k.publicKey)),priv:b64(await crypto.subtle.exportKey('pkcs8',k.privateKey))}}
+async function encFor(file,pubB64){const pub=await crypto.subtle.importKey('spki',ub(pubB64),RSA,false,['encrypt']);
+ const aes=await crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt']),iv=crypto.getRandomValues(new Uint8Array(12));
+ const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},aes,await file.arrayBuffer());
+ const wk=await crypto.subtle.encrypt('RSA-OAEP',pub,await crypto.subtle.exportKey('raw',aes));
+ return{blob:new Blob([ct]),iv:b64(iv),wkey:b64(wk)}}
+async function decWith(priv,buf,iv,wkey){const k=await crypto.subtle.importKey('pkcs8',ub(priv),RSA,false,['decrypt']);
+ const raw=await crypto.subtle.decrypt('RSA-OAEP',k,ub(wkey)),aes=await crypto.subtle.importKey('raw',raw,'AES-GCM',false,['decrypt']);
+ return crypto.subtle.decrypt({name:'AES-GCM',iv:ub(iv)},aes,buf)}
+
+async function api(u,o={}){o.headers={...(o.headers||{})};if(S)o.headers.Authorization='Bearer '+S.token;
+ if(o.body&&!(o.body instanceof FormData)){o.headers['Content-Type']='application/json';o.body=JSON.stringify(o.body)}
+ const r=await fetch('/api'+u,o);if(r.status===401&&S&&u!=='/login'){logout();throw new Error('expired')}
+ if(!r.ok){const e=(await r.json().catch(()=>({}))).error||'Error';alert(e);throw new Error(e)}return r}
+async function sendEnc(url,file,pub){const e=await encFor(file,pub),f=new FormData();
+ f.append('iv',e.iv);f.append('wkey',e.wkey);f.append('name',file.name);f.append('file',e.blob);await api(url,{method:'POST',body:f})}
+async function download(id){const r=await api('/file/'+id),buf=await r.arrayBuffer();
+ const plain=await decWith(sessionStorage.priv,buf,r.headers.get('x-iv'),r.headers.get('x-wkey'));
+ const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([plain]));a.download=decodeURIComponent(r.headers.get('x-name'));a.click()}
+
+function authView(){app.innerHTML=`<div class="hero"><h1>File your income tax without sharing your documents with anyone else</h1>
+<p>Upload your Form 16. It is encrypted on your device, so only your tax filer can open it. Flat fee ₹200.</p></div>
+<div class="card"><h3>Log in or create an account</h3><input id="n" placeholder="Full name (sign up only)" autocomplete="name">
+<input id="e" placeholder="Email" autocomplete="email"><input id="m" placeholder="Mobile number (sign up only)" inputmode="numeric">
+<input id="pw" type="password" placeholder="Password (8+ characters)" autocomplete="current-password">
+<button onclick="login()">Log in</button><button onclick="signup()">Create account</button></div>`}
+async function signup(){const v=id=>$(id).value.trim(),pw=$('pw').value;if(pw.length<8)return alert('Use a password with at least 8 characters');
+ const k=await genKeys(),rec=b64(crypto.getRandomValues(new Uint8Array(20)));
+ const r=await api('/signup',{method:'POST',body:{name:v('n'),email:v('e'),mobile:v('m'),authSecret:await authSecret(v('e'),pw),pubkey:k.pub,privWrappedPw:await wrapKey(k.priv,pw),privWrappedRec:await wrapKey(k.priv,rec)}});
+ S=await r.json();save();sessionStorage.priv=k.priv;recView(rec)}
+function recView(rec){app.innerHTML=`<div class="card"><h2>Save your recovery key</h2><p>Your documents are locked with keys only you hold. If you forget your password and lose this key, your documents cannot be recovered, by you or by us.</p>
+<code>${rec}</code><button onclick="saveRec('${rec}')">Download key</button><label><input type="checkbox" id="ok" style="width:auto"> I have saved my recovery key</label><br>
+<button onclick="$('ok').checked?route():alert('Tick the box to confirm')">Continue</button></div>`}
+function saveRec(r){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['TaxEasy recovery key:\n'+r]));a.download='taxeasy-recovery-key.txt';a.click()}
+async function login(){const e=$('e').value.trim(),pw=$('pw').value;
+ const d=await(await api('/login',{method:'POST',body:{email:e,authSecret:await authSecret(e,pw)}})).json();
+ try{sessionStorage.priv=await unwrapKey(d.privWrappedPw,pw)}catch{return alert('Could not unlock your keys')}
+ S=d;save();route()}
+function logout(){sessionStorage.clear();S=null;route()}
+async function route(){$('who').innerHTML=S?`${S.name} <a href="#" style="color:#fff;margin-left:12px" onclick="logout();return false">Log out</a>`:'';
+ if(!S)return authView();if(S.role==='admin')return adminView();
+ const m=await(await api('/me')).json();(m.emailOk&&m.mobileOk)?empView(m):verifyView(m)}
+
+function verifyView(m){app.innerHTML=`<div class="card"><h3>Verify your contact details</h3>${['email','mobile'].map(c=>`<div class="row"><b style="width:70px">${c}</b>${m[c+'Ok']?'Verified':
+ `<button onclick="sendOtp('${c}')">Send OTP</button><input id="o_${c}" placeholder="6-digit OTP" inputmode="numeric"><button onclick="verOtp('${c}')">Verify</button>`}</div>`).join('')}</div>`}
+async function sendOtp(c){const d=await(await api('/otp/send',{method:'POST',body:{channel:c}})).json();alert(d.devCode?'DEMO MODE. Your OTP is '+d.devCode:'OTP sent')}
+async function verOtp(c){await api('/otp/verify',{method:'POST',body:{channel:c,code:$('o_'+c).value.trim()}});route()}
+
+function empView(m){const L=['Registered','Uploaded','In Review','Completed'];
+ app.innerHTML=`<div class="card"><h3>Your return for AY ${m.ay}</h3><div class="steps">${L.map(s=>`<span class="s ${L.indexOf(s)<=L.indexOf(m.status)?'on':''}">${s}</span>`).join('')}</div></div>
+ <div class="card"><h3>Upload Form 16 (photo or PDF)</h3><input id="f" type="file" accept="image/*,.pdf"><button onclick="upl()">Encrypt and upload</button></div>
+ <div class="card"><h3>Pay the ₹200 filing fee</h3>${m.paid?'Payment received':'<button onclick="pay()">Pay ₹200</button>'}</div>
+ <div class="card"><h3>Your filed documents</h3>${m.results.map(r=>`<div class="row">${r.name}<button onclick="download('${r.id}')">Decrypt and download</button></div>`).join('')||'Your documents will appear here once your return is filed.'}</div>`}
+async function upl(){const f=$('f').files[0];if(!f)return alert('Choose a file first');
+ const k=await(await api('/admin-key')).json();if(!k.pubkey)return alert('The tax filer has not finished setup yet. Try again later');
+ await sendEnc('/files',f,k.pubkey);route()}
+async function pay(){const cfg=await(await fetch('/api/config')).json(),o=await(await api('/pay/order',{method:'POST'})).json();
+ if(cfg.mock){if(!confirm('DEMO MODE: no real money is charged. Simulate paying ₹200?'))return;await api('/pay/mock',{method:'POST'});return route()}
+ await new Promise(r=>{const s=document.createElement('script');s.src='https://checkout.razorpay.com/v1/checkout.js';s.onload=r;document.head.append(s)});
+ new Razorpay({key:cfg.rzpKey,order_id:o.orderId,amount:o.amount,name:'TaxEasy',handler:()=>setTimeout(route,3000)}).open()}
+
+async function adminView(){const cs=await(await api('/admin/cases')).json();
+ app.innerHTML=`<div class="card"><h3>Clients</h3><div style="overflow-x:auto"><table><tr><th>Client</th><th>Status</th><th>Paid</th><th>Form 16</th><th>Send result</th></tr>${cs.map(c=>`<tr><td>${c.name}<br><small>${c.email} | ${c.mobile}</small></td>
+ <td>${c.status}</td><td>${c.paid?'Yes':'No'}</td><td>${c.files.map(f=>`<button onclick="download('${f.id}')">${f.name}</button>`).join('')||'None yet'}</td>
+ <td><input type="file" id="r${c.id}"><button onclick="sendRes('${c.id}')">Send</button></td></tr>`).join('')||'<tr><td colspan=5>No clients yet</td></tr>'}</table></div></div>`}
+async function sendRes(id){const f=$('r'+id).files[0];if(!f)return alert('Choose a file first');
+ const k=await(await api('/admin/user-key/'+id)).json();await sendEnc('/admin/result/'+id,f,k.pubkey);adminView()}
+route();
+</script></body></html>

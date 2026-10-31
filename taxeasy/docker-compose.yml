@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: taxeasy
+      POSTGRES_PASSWORD: "${DB_PASSWORD}"
+      POSTGRES_DB: taxeasy
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    restart: unless-stopped
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgres://taxeasy:${DB_PASSWORD}@db:5432/taxeasy"
+    depends_on: [db]
+    volumes:
+      - files:/data/files
+    restart: unless-stopped
+  frontend:
+    build: ./frontend
+    ports: ["8080:80"]
+    depends_on: [backend]
+    restart: unless-stopped
+  caddy:
+    profiles: ["prod"]
+    image: caddy:2
+    environment:
+      DOMAIN: "${DOMAIN}"
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy:/data
+    depends_on: [frontend]
+    restart: unless-stopped
+volumes:
+  pgdata: {}
+  files: {}
+  caddy: {}
